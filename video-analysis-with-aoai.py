@@ -145,7 +145,6 @@ def process_video(video_path, frames_per_second=FRAMES_PER_SECOND, resize=RESIZE
 
     # Prepare to write the frames to disk
     if output_dir != '': # if we want to write the frame to disk
-        output_dir = 'frames'
         os.makedirs(output_dir, exist_ok=True)
         frame_count = 1
 
