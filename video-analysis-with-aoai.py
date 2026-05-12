@@ -381,14 +381,9 @@ st.title(f'Video Analysis with {aoai_model_name}')
 
 with st.sidebar:
     file_or_url = st.selectbox("Video source:", ["File", "URL"], index=0, help="Select the source, file or url")
-    # file_or_url = "File"
-    initial_split = 0
+    initial_split = SEGMENT_DURATION
     if file_or_url == "URL":
         continuous_transmision = st.checkbox('Continuous transmision', False, help="Video of a continuous transmision")
-        if continuous_transmision:
-            initial_split = SEGMENT_DURATION
-    else:
-        initial_split = SEGMENT_DURATION
 
     if USE_WHISPER:
         audio_transcription = st.checkbox('Transcript audio', True, help="Extract the audio transcription and use in the analysis or not")

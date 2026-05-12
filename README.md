@@ -15,6 +15,13 @@ The steps to process a video are the following:
 + *(Optional)* A Whisper deployment if you want audio transcription (`USE_WHISPER=True` in the script).
 + Python 3.10 or later. Tested with Python 3.12.
 + [Visual Studio Code](https://code.visualstudio.com/) with the [Python extension](https://code.visualstudio.com/docs/python/python-tutorial).
++ **[ffmpeg](https://ffmpeg.org/)** available in your `PATH`. Required by `yt-dlp` to download partial YouTube segments and by the frame/audio extraction pipeline. On Windows you can install it with:
+
+  ```powershell
+  winget install --id=Gyan.FFmpeg -e
+  ```
+
+  See the [Troubleshooting](#troubleshooting) section if `ffmpeg` is installed but not detected.
 
 ## Set up a Python virtual environment in Visual Studio Code
 
@@ -107,6 +114,40 @@ These are defined at the top of [video-analysis-with-aoai.py](video-analysis-wit
 | `RESIZE_OF_FRAMES` | `1` | Default resize divider (1 = original size). |
 | `REASONING_EFFORT` | `"medium"` | Reasoning effort for o-series models (`none`, `low`, `medium`, `high`). |
 | `DEFAULT_TEMPERATURE` | `0.5` | Default temperature (currently overridden to `0.0` in the UI). |
+
+## Troubleshooting
+
+### `ERROR: You have requested downloading the video partially, but ffmpeg is not installed. Aborting`
+
+`yt-dlp` requires **ffmpeg** to cut and remux YouTube streams when only a segment of the video is requested (which is what this app does whenever `seconds_to_split > 0`).
+
+1. Install ffmpeg (Windows):
+
+   ```powershell
+   winget install --id=Gyan.FFmpeg -e
+   ```
+
+2. Make sure `ffmpeg.exe` is in your `PATH`. If `winget` reports it is already installed but `ffmpeg -version` fails, locate the binary and add its `bin` folder to the user `PATH`:
+
+   ```powershell
+   $ffmpegBin = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg*" -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
+   $userPath  = [Environment]::GetEnvironmentVariable("Path", "User")
+   if ($userPath -notlike "*$ffmpegBin*") {
+       [Environment]::SetEnvironmentVariable("Path", "$userPath;$ffmpegBin", "User")
+   }
+   ```
+
+3. **Restart VS Code / your terminal** so the new `PATH` is picked up, then re-run the app.
+
+### `WARNING: [youtube] No supported JavaScript runtime could be found`
+
+A recent `yt-dlp` warning. It does not break downloads today, but YouTube will eventually require a JS runtime. Install Deno to silence it and future-proof the extractor:
+
+```powershell
+winget install DenoLand.Deno
+```
+
+`yt-dlp` will detect it automatically.
 
 ## Deploying to Azure
 
