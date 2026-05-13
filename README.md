@@ -39,22 +39,27 @@ If you run into problems, see [Python environments in VS Code](https://code.visu
 
 ## Configuration
 
-Copy [.env-sample](.env-sample) to `.env` and fill in your values:
+Copy [.env-sample](.env-sample) to `.env` and fill in your values. The endpoint can use either the classic `*.openai.azure.com` form or the newer Foundry-style `*.cognitiveservices.azure.com` form:
 
 ```env
-AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com/
-AZURE_OPENAI_DEPLOYMENT_NAME=<your-multimodal-deployment-name>
+# --- Azure OpenAI (multimodal model) ---
+AZURE_OPENAI_ENDPOINT=https://<your-resource>.cognitiveservices.azure.com/
+# Or the classic form:
+# AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT_NAME=<your-multimodal-deployment-name>     # e.g. gpt-5.2, gpt-4o, gpt-4.1, o4-mini
 
 # Optional — only required if you authenticate with API key (see Authentication below)
-AZURE_OPENAI_API_KEY=<your-api-key>
+# AZURE_OPENAI_API_KEY=<your-api-key>
 
-# Set to True to enable audio transcription via Whisper. Defaults to False.
+# --- Optional: Whisper for audio transcription ---
 USE_WHISPER=False
 # Only required if USE_WHISPER=True
 WHISPER_ENDPOINT=https://<your-whisper-resource>.openai.azure.com/
 WHISPER_API_KEY=<your-whisper-api-key>
-WHISPER_DEPLOYMENT_NAME=<your-whisper-deployment-name>
+WHISPER_DEPLOYMENT_NAME=whisper
 ```
+
+> **Note:** Whisper currently uses API key authentication, while the multimodal Azure OpenAI client supports both API key and Entra ID (see below). Keep the Whisper resource and its key only if you actually need audio transcription.
 
 ### Authentication
 
@@ -151,9 +156,67 @@ winget install DenoLand.Deno
 
 ## Deploying to Azure
 
-To deploy the application to Azure as a containerized web app:
+The repo ships with a ready-to-use [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/) template that provisions all required infrastructure as Bicep and deploys the container image in a single command.
 
-1. Build and push the Docker image to Azure Container Registry — see [Build and store an image by using Azure Container Registry](https://learn.microsoft.com/training/modules/deploy-run-container-app-service/3-exercise-build-images).
-2. Create and deploy the web app from the image — see [Create and deploy a web app from a Docker image](https://learn.microsoft.com/training/modules/deploy-run-container-app-service/5-exercise-deploy-web-app).
+### What gets deployed
 
-When deploying to Azure App Service, prefer **Managed Identity** (Entra ID) over API keys: assign the *Cognitive Services OpenAI User* role to the App Service's managed identity on the Azure OpenAI resource, and **do not** set `AZURE_OPENAI_API_KEY` in the app settings.
+Defined in [infra/main.bicep](infra/main.bicep):
+
+- **Resource Group**
+- **Log Analytics workspace**
+- **Azure Container Registry** (Basic, admin disabled)
+- **Container Apps Environment** wired to Log Analytics
+- **Azure Container App** running the Streamlit app on port `8501`, external ingress, transport `auto` (WebSockets), System-Assigned Managed Identity, ACR pull via identity
+- **RBAC**:
+  - `AcrPull` on the ACR (for the app's Managed Identity)
+  - `Cognitive Services OpenAI User` on the existing Azure OpenAI account (keyless auth via `DefaultAzureCredential`)
+
+The Azure OpenAI account is **not created** by the template — it is referenced as an existing resource (potentially in a different resource group).
+
+### Prerequisites
+
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) and [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd) installed.
+- An existing Azure OpenAI account with a multimodal chat deployment (e.g. `gpt-4o`).
+- Owner or User Access Administrator permissions on the target subscription (the template assigns RBAC roles).
+
+### Deploy with `azd`
+
+```powershell
+# 1) Sign in
+az login
+azd auth login
+
+# 2) Create a new azd environment
+azd env new video-analysis-dev
+
+# 3) Set required parameters (consumed by infra/main.parameters.json)
+azd env set AZURE_LOCATION                westeurope
+azd env set AZURE_OPENAI_RESOURCE_GROUP   <rg-of-your-existing-aoai>
+azd env set AZURE_OPENAI_ACCOUNT_NAME     <name-of-your-existing-aoai>
+azd env set AZURE_OPENAI_DEPLOYMENT_NAME  <your-multimodal-deployment-name>
+
+# 4) Provision infra + build image in ACR + deploy the Container App
+azd up
+```
+
+When it finishes, `azd` prints the public URL of the app (also exposed as the `SERVICE_WEB_URI` output).
+
+### Common follow-up commands
+
+```powershell
+# Redeploy just the application (rebuilds and pushes a new image)
+azd deploy
+
+# Re-run only the infra provisioning
+azd provision
+
+# Tear everything down
+azd down --purge
+```
+
+### Notes
+
+- Authentication to Azure OpenAI is **keyless** via the Container App's Managed Identity. No API keys are stored.
+- `USE_WHISPER` defaults to `false`. To enable Whisper, set the optional parameters in [infra/main.parameters.json](infra/main.parameters.json) (`useWhisper`, `whisperEndpoint`, `whisperDeploymentName`, `whisperApiKey`) — the key is stored as a Container App secret.
+- The Dockerfile installs `ffmpeg`, `libgl1` and DejaVu fonts so that OpenCV, MoviePy and the timestamp overlay work in the container.
+- Ephemeral folders (`frames/`, `segments/`, `temp/`) are recreated per run and are lost on container restart. If persistence is needed, mount Azure Files via the Container Apps Environment.
