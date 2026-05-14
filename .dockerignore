@@ -38,8 +38,8 @@ azure.yaml
 azd-up.ps1
 deploy.ps1
 
-# Notebooks / docs / images (not used at runtime)
+# Notebooks / docs (not used at runtime)
 *.ipynb
 README.md
 Screenshot.png
-microsoft.png
+# microsoft.png is rendered by the Streamlit app at runtime — keep it.

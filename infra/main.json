@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.41.2.15936",
-      "templateHash": "2225091315732225688"
+      "templateHash": "4475881021713671832"
     }
   },
   "parameters": {
@@ -102,11 +102,14 @@
       "operationalInsightsWorkspaces": "log-",
       "containerRegistryRegistries": "cr",
       "appManagedEnvironments": "cae-",
-      "appContainerApps": "ca-"
+      "appContainerApps": "ca-",
+      "managedIdentityUserAssignedIdentities": "id-"
     },
     "abbrs": "[variables('$fxv#0')]",
     "resourceToken": "[toLower(uniqueString(subscription().id, parameters('environmentName'), parameters('location')))]",
-    "serviceName": "web"
+    "serviceName": "web",
+    "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d",
+    "aoaiUserRoleId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
   },
   "resources": [
     {
@@ -352,7 +355,7 @@
     {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
-      "name": "app",
+      "name": "identity",
       "resourceGroup": "[format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))]",
       "properties": {
         "expressionEvaluationOptions": {
@@ -364,52 +367,10 @@
             "value": "[parameters('location')]"
           },
           "tags": {
-            "value": "[union(parameters('tags'), createObject('azd-service-name', variables('serviceName')))]"
+            "value": "[parameters('tags')]"
           },
           "name": {
-            "value": "[format('{0}{1}-{2}', variables('abbrs').appContainerApps, variables('serviceName'), variables('resourceToken'))]"
-          },
-          "environmentId": {
-            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'cae'), '2025-04-01').outputs.id.value]"
-          },
-          "registryServer": {
-            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'registry'), '2025-04-01').outputs.loginServer.value]"
-          },
-          "imageName": {
-            "value": "mcr.microsoft.com/k8se/quickstart:latest"
-          },
-          "targetPort": {
-            "value": 80
-          },
-          "cpu": {
-            "value": "[parameters('containerCpu')]"
-          },
-          "memory": {
-            "value": "[parameters('containerMemory')]"
-          },
-          "minReplicas": {
-            "value": "[parameters('minReplicas')]"
-          },
-          "maxReplicas": {
-            "value": "[parameters('maxReplicas')]"
-          },
-          "aoaiEndpoint": {
-            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('aoaiResourceGroupName')), 'Microsoft.CognitiveServices/accounts', parameters('aoaiAccountName')), '2024-10-01').endpoint]"
-          },
-          "aoaiDeploymentName": {
-            "value": "[parameters('aoaiDeploymentName')]"
-          },
-          "useWhisper": {
-            "value": "[parameters('useWhisper')]"
-          },
-          "whisperEndpoint": {
-            "value": "[parameters('whisperEndpoint')]"
-          },
-          "whisperDeploymentName": {
-            "value": "[parameters('whisperDeploymentName')]"
-          },
-          "whisperApiKey": {
-            "value": "[parameters('whisperApiKey')]"
+            "value": "[format('{0}{1}-{2}', variables('abbrs').managedIdentityUserAssignedIdentities, variables('serviceName'), variables('resourceToken'))]"
           }
         },
         "template": {
@@ -419,7 +380,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "5635635226876897821"
+              "templateHash": "1927699209140047797"
             }
           },
           "parameters": {
@@ -431,149 +392,38 @@
             },
             "name": {
               "type": "string"
-            },
-            "environmentId": {
-              "type": "string"
-            },
-            "registryServer": {
-              "type": "string"
-            },
-            "imageName": {
-              "type": "string"
-            },
-            "targetPort": {
-              "type": "int",
-              "defaultValue": 8501
-            },
-            "cpu": {
-              "type": "string",
-              "defaultValue": "1.0"
-            },
-            "memory": {
-              "type": "string",
-              "defaultValue": "2.0Gi"
-            },
-            "minReplicas": {
-              "type": "int",
-              "defaultValue": 1
-            },
-            "maxReplicas": {
-              "type": "int",
-              "defaultValue": 3
-            },
-            "attachRegistry": {
-              "type": "bool",
-              "defaultValue": false,
-              "metadata": {
-                "description": "When true, configure the ACR registry with system-assigned identity. Set to false on first deploy to avoid chicken-and-egg with AcrPull role assignment."
-              }
-            },
-            "aoaiEndpoint": {
-              "type": "string"
-            },
-            "aoaiDeploymentName": {
-              "type": "string"
-            },
-            "useWhisper": {
-              "type": "bool",
-              "defaultValue": false
-            },
-            "whisperEndpoint": {
-              "type": "string",
-              "defaultValue": ""
-            },
-            "whisperDeploymentName": {
-              "type": "string",
-              "defaultValue": ""
-            },
-            "whisperApiKey": {
-              "type": "securestring",
-              "defaultValue": ""
             }
-          },
-          "variables": {
-            "baseEnv": [
-              {
-                "name": "AZURE_OPENAI_ENDPOINT",
-                "value": "[parameters('aoaiEndpoint')]"
-              },
-              {
-                "name": "AZURE_OPENAI_DEPLOYMENT_NAME",
-                "value": "[parameters('aoaiDeploymentName')]"
-              },
-              {
-                "name": "USE_WHISPER",
-                "value": "[string(parameters('useWhisper'))]"
-              }
-            ],
-            "whisperEnv": "[if(parameters('useWhisper'), createArray(createObject('name', 'WHISPER_ENDPOINT', 'value', parameters('whisperEndpoint')), createObject('name', 'WHISPER_DEPLOYMENT_NAME', 'value', parameters('whisperDeploymentName')), createObject('name', 'WHISPER_API_KEY', 'secretRef', 'whisper-api-key')), createArray())]"
           },
           "resources": [
             {
-              "type": "Microsoft.App/containerApps",
-              "apiVersion": "2024-03-01",
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
               "name": "[parameters('name')]",
               "location": "[parameters('location')]",
-              "tags": "[parameters('tags')]",
-              "identity": {
-                "type": "SystemAssigned"
-              },
-              "properties": {
-                "managedEnvironmentId": "[parameters('environmentId')]",
-                "configuration": {
-                  "activeRevisionsMode": "Single",
-                  "ingress": {
-                    "external": true,
-                    "targetPort": "[parameters('targetPort')]",
-                    "transport": "auto",
-                    "allowInsecure": false
-                  },
-                  "registries": "[if(parameters('attachRegistry'), createArray(createObject('server', parameters('registryServer'), 'identity', 'system')), createArray())]",
-                  "secrets": "[if(and(parameters('useWhisper'), not(empty(parameters('whisperApiKey')))), createArray(createObject('name', 'whisper-api-key', 'value', parameters('whisperApiKey'))), createArray())]"
-                },
-                "template": {
-                  "containers": [
-                    {
-                      "name": "app",
-                      "image": "[parameters('imageName')]",
-                      "resources": {
-                        "cpu": "[json(parameters('cpu'))]",
-                        "memory": "[parameters('memory')]"
-                      },
-                      "env": "[concat(variables('baseEnv'), variables('whisperEnv'))]"
-                    }
-                  ],
-                  "scale": {
-                    "minReplicas": "[parameters('minReplicas')]",
-                    "maxReplicas": "[parameters('maxReplicas')]"
-                  }
-                }
-              }
+              "tags": "[parameters('tags')]"
             }
           ],
           "outputs": {
             "id": {
               "type": "string",
-              "value": "[resourceId('Microsoft.App/containerApps', parameters('name'))]"
+              "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('name'))]"
             },
             "name": {
               "type": "string",
               "value": "[parameters('name')]"
             },
-            "fqdn": {
-              "type": "string",
-              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-03-01').configuration.ingress.fqdn]"
-            },
             "principalId": {
               "type": "string",
-              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-03-01', 'full').identity.principalId]"
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('name')), '2023-01-31').principalId]"
+            },
+            "clientId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('name')), '2023-01-31').clientId]"
             }
           }
         }
       },
       "dependsOn": [
-        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'cae')]",
-        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'registry')]",
         "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName')))]"
       ]
     },
@@ -589,10 +439,10 @@
         "mode": "Incremental",
         "parameters": {
           "principalId": {
-            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'app'), '2025-04-01').outputs.principalId.value]"
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.principalId.value]"
           },
           "roleDefinitionId": {
-            "value": "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+            "value": "[variables('acrPullRoleId')]"
           },
           "resourceId": {
             "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'registry'), '2025-04-01').outputs.id.value]"
@@ -638,7 +488,7 @@
         }
       },
       "dependsOn": [
-        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'app')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity')]",
         "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'registry')]",
         "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName')))]"
       ]
@@ -655,13 +505,13 @@
         "mode": "Incremental",
         "parameters": {
           "principalId": {
-            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'app'), '2025-04-01').outputs.principalId.value]"
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.principalId.value]"
           },
           "accountName": {
             "value": "[parameters('aoaiAccountName')]"
           },
           "roleDefinitionId": {
-            "value": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+            "value": "[variables('aoaiUserRoleId')]"
           }
         },
         "template": {
@@ -701,7 +551,255 @@
         }
       },
       "dependsOn": [
-        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'app')]"
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "app",
+      "resourceGroup": "[format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[union(parameters('tags'), createObject('azd-service-name', variables('serviceName')))]"
+          },
+          "name": {
+            "value": "[format('{0}{1}-{2}', variables('abbrs').appContainerApps, variables('serviceName'), variables('resourceToken'))]"
+          },
+          "environmentId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'cae'), '2025-04-01').outputs.id.value]"
+          },
+          "registryServer": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'registry'), '2025-04-01').outputs.loginServer.value]"
+          },
+          "identityId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.id.value]"
+          },
+          "identityClientId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.clientId.value]"
+          },
+          "imageName": {
+            "value": "mcr.microsoft.com/k8se/quickstart:latest"
+          },
+          "targetPort": {
+            "value": 80
+          },
+          "cpu": {
+            "value": "[parameters('containerCpu')]"
+          },
+          "memory": {
+            "value": "[parameters('containerMemory')]"
+          },
+          "minReplicas": {
+            "value": "[parameters('minReplicas')]"
+          },
+          "maxReplicas": {
+            "value": "[parameters('maxReplicas')]"
+          },
+          "aoaiEndpoint": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('aoaiResourceGroupName')), 'Microsoft.CognitiveServices/accounts', parameters('aoaiAccountName')), '2024-10-01').endpoint]"
+          },
+          "aoaiDeploymentName": {
+            "value": "[parameters('aoaiDeploymentName')]"
+          },
+          "useWhisper": {
+            "value": "[parameters('useWhisper')]"
+          },
+          "whisperEndpoint": {
+            "value": "[parameters('whisperEndpoint')]"
+          },
+          "whisperDeploymentName": {
+            "value": "[parameters('whisperDeploymentName')]"
+          },
+          "whisperApiKey": {
+            "value": "[parameters('whisperApiKey')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.41.2.15936",
+              "templateHash": "16139618835299851029"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "environmentId": {
+              "type": "string"
+            },
+            "registryServer": {
+              "type": "string"
+            },
+            "identityId": {
+              "type": "string"
+            },
+            "identityClientId": {
+              "type": "string"
+            },
+            "imageName": {
+              "type": "string"
+            },
+            "targetPort": {
+              "type": "int",
+              "defaultValue": 8501
+            },
+            "cpu": {
+              "type": "string",
+              "defaultValue": "1.0"
+            },
+            "memory": {
+              "type": "string",
+              "defaultValue": "2.0Gi"
+            },
+            "minReplicas": {
+              "type": "int",
+              "defaultValue": 1
+            },
+            "maxReplicas": {
+              "type": "int",
+              "defaultValue": 3
+            },
+            "aoaiEndpoint": {
+              "type": "string"
+            },
+            "aoaiDeploymentName": {
+              "type": "string"
+            },
+            "useWhisper": {
+              "type": "bool",
+              "defaultValue": false
+            },
+            "whisperEndpoint": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "whisperDeploymentName": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "whisperApiKey": {
+              "type": "securestring",
+              "defaultValue": ""
+            }
+          },
+          "variables": {
+            "baseEnv": [
+              {
+                "name": "AZURE_OPENAI_ENDPOINT",
+                "value": "[parameters('aoaiEndpoint')]"
+              },
+              {
+                "name": "AZURE_OPENAI_DEPLOYMENT_NAME",
+                "value": "[parameters('aoaiDeploymentName')]"
+              },
+              {
+                "name": "USE_WHISPER",
+                "value": "[string(parameters('useWhisper'))]"
+              },
+              {
+                "name": "AZURE_CLIENT_ID",
+                "value": "[parameters('identityClientId')]"
+              }
+            ],
+            "whisperEnv": "[if(parameters('useWhisper'), createArray(createObject('name', 'WHISPER_ENDPOINT', 'value', parameters('whisperEndpoint')), createObject('name', 'WHISPER_DEPLOYMENT_NAME', 'value', parameters('whisperDeploymentName')), createObject('name', 'WHISPER_API_KEY', 'secretRef', 'whisper-api-key')), createArray())]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2024-03-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                  "[format('{0}', parameters('identityId'))]": {}
+                }
+              },
+              "properties": {
+                "managedEnvironmentId": "[parameters('environmentId')]",
+                "configuration": {
+                  "activeRevisionsMode": "Single",
+                  "ingress": {
+                    "external": true,
+                    "targetPort": "[parameters('targetPort')]",
+                    "transport": "auto",
+                    "allowInsecure": false
+                  },
+                  "registries": [
+                    {
+                      "server": "[parameters('registryServer')]",
+                      "identity": "[parameters('identityId')]"
+                    }
+                  ],
+                  "secrets": "[if(and(parameters('useWhisper'), not(empty(parameters('whisperApiKey')))), createArray(createObject('name', 'whisper-api-key', 'value', parameters('whisperApiKey'))), createArray())]"
+                },
+                "template": {
+                  "containers": [
+                    {
+                      "name": "app",
+                      "image": "[parameters('imageName')]",
+                      "resources": {
+                        "cpu": "[json(parameters('cpu'))]",
+                        "memory": "[parameters('memory')]"
+                      },
+                      "env": "[concat(variables('baseEnv'), variables('whisperEnv'))]"
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": "[parameters('minReplicas')]",
+                    "maxReplicas": "[parameters('maxReplicas')]"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.App/containerApps', parameters('name'))]"
+            },
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "fqdn": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-03-01').configuration.ingress.fqdn]"
+            },
+            "identityId": {
+              "type": "string",
+              "value": "[parameters('identityId')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'rbac-acrpull')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('aoaiResourceGroupName')), 'Microsoft.Resources/deployments', 'rbac-aoai-user')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'cae')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'registry')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName')))]"
       ]
     }
   ],
@@ -733,6 +831,14 @@
     "AZURE_CONTAINER_APP_FQDN": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'app'), '2025-04-01').outputs.fqdn.value]"
+    },
+    "AZURE_CONTAINER_APP_IDENTITY_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.id.value]"
+    },
+    "AZURE_CONTAINER_APP_IDENTITY_CLIENT_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('{0}{1}', variables('abbrs').resourcesResourceGroups, parameters('environmentName'))), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.clientId.value]"
     },
     "SERVICE_WEB_NAME": {
       "type": "string",
