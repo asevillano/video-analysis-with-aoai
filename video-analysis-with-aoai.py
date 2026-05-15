@@ -74,8 +74,8 @@ REASONING_EFFORT = "medium" # "none", "low", "medium" or "high"
 load_dotenv(override=True)
 
 # System prompt for the Purpose
-#SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
-SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
+SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
+#SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
 
 # Whisper: enable/disable from .env (USE_WHISPER=true|false). Defaults to False.
 USE_WHISPER = os.environ.get("USE_WHISPER", "False").strip().lower() in ("true", "1", "yes")
@@ -449,7 +449,7 @@ def display_analysis(st, analysis, label='Description'):
         st.json(parsed, expanded=True)
 
         print(f'Parsed analysis JSON for segment {segment_path}: {json.dumps(parsed, indent=2)}')
-        
+
     except (json.JSONDecodeError, ValueError):
         # Fallback: show as markdown so newlines/markdown formatting are respected
         st.markdown(f"**{label}**\n\n{analysis}", unsafe_allow_html=True)
@@ -656,8 +656,19 @@ if analyze_clicked:
                 with open(video_path, "wb") as f:
                     f.write(video_file.getbuffer())
 
-                # Splitting video in segment of N seconds (if seconds is 0 t will not split the video)
-                for segment_path, segment_start in split_video(video_path, output_dir, seconds_split, start_second=starting_second):
+                # Splitting video in segment of N seconds (if seconds is 0 t will not split the video).
+                # Wrap the generator in a spinner so the user sees activity while moviepy/ffmpeg
+                # writes the next segment to disk (this can take several seconds for large videos
+                # and otherwise leaves the UI looking idle between segments).
+                segment_iter = split_video(video_path, output_dir, seconds_split, start_second=starting_second)
+                segment_index = 0
+                while True:
+                    segment_index += 1
+                    with st.spinner(f"Preparing segment {segment_index}..."):
+                        try:
+                            segment_path, segment_start = next(segment_iter)
+                        except StopIteration:
+                            break
                     if st.session_state.cancel_requested:
                         st.warning("Analysis cancelled by user.")
                         break
