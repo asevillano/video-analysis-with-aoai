@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.41.2.15936",
-      "templateHash": "4475881021713671832"
+      "templateHash": "17318147316157182559"
     }
   },
   "parameters": {
@@ -52,10 +52,10 @@
       }
     },
     "useWhisper": {
-      "type": "bool",
-      "defaultValue": false,
+      "type": "string",
+      "defaultValue": "false",
       "metadata": {
-        "description": "Enable Whisper transcription path in the app."
+        "description": "Enable Whisper transcription path in the app. Accepts bool or string (\"true\"/\"false\")."
       }
     },
     "whisperEndpoint": {
@@ -105,6 +105,7 @@
       "appContainerApps": "ca-",
       "managedIdentityUserAssignedIdentities": "id-"
     },
+    "useWhisperBool": "[equals(toLower(parameters('useWhisper')), 'true')]",
     "abbrs": "[variables('$fxv#0')]",
     "resourceToken": "[toLower(uniqueString(subscription().id, parameters('environmentName'), parameters('location')))]",
     "serviceName": "web",
@@ -590,7 +591,7 @@
             "value": "mcr.microsoft.com/k8se/quickstart:latest"
           },
           "targetPort": {
-            "value": 80
+            "value": 8501
           },
           "cpu": {
             "value": "[parameters('containerCpu')]"
@@ -611,7 +612,7 @@
             "value": "[parameters('aoaiDeploymentName')]"
           },
           "useWhisper": {
-            "value": "[parameters('useWhisper')]"
+            "value": "[variables('useWhisperBool')]"
           },
           "whisperEndpoint": {
             "value": "[parameters('whisperEndpoint')]"
@@ -630,7 +631,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "16139618835299851029"
+              "templateHash": "1013354766852517402"
             }
           },
           "parameters": {
@@ -720,7 +721,9 @@
                 "value": "[parameters('identityClientId')]"
               }
             ],
-            "whisperEnv": "[if(parameters('useWhisper'), createArray(createObject('name', 'WHISPER_ENDPOINT', 'value', parameters('whisperEndpoint')), createObject('name', 'WHISPER_DEPLOYMENT_NAME', 'value', parameters('whisperDeploymentName')), createObject('name', 'WHISPER_API_KEY', 'secretRef', 'whisper-api-key')), createArray())]"
+            "whisperBaseEnv": "[if(parameters('useWhisper'), createArray(createObject('name', 'WHISPER_ENDPOINT', 'value', parameters('whisperEndpoint')), createObject('name', 'WHISPER_DEPLOYMENT_NAME', 'value', parameters('whisperDeploymentName'))), createArray())]",
+            "whisperKeyEnv": "[if(and(parameters('useWhisper'), not(empty(parameters('whisperApiKey')))), createArray(createObject('name', 'WHISPER_API_KEY', 'secretRef', 'whisper-api-key')), createArray())]",
+            "whisperEnv": "[concat(variables('whisperBaseEnv'), variables('whisperKeyEnv'))]"
           },
           "resources": [
             {

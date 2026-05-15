@@ -30,6 +30,11 @@ param(
     [Parameter(Mandatory = $true)] [string] $AoaiAccountName,
     [Parameter(Mandatory = $true)] [string] $AoaiDeploymentName,
 
+    [bool]   $UseWhisper            = $false,
+    [string] $WhisperEndpoint       = '',
+    [string] $WhisperDeploymentName = '',
+    [string] $WhisperApiKey         = '',
+
     [string] $SubscriptionId,
     [ValidateSet("local", "remote", "ask")]
     [string] $BuildMode = "ask",
@@ -181,6 +186,16 @@ azd env set AZURE_LOCATION                $Location             | Out-Null
 azd env set AZURE_OPENAI_RESOURCE_GROUP   $AoaiResourceGroup    | Out-Null
 azd env set AZURE_OPENAI_ACCOUNT_NAME     $AoaiAccountName      | Out-Null
 azd env set AZURE_OPENAI_DEPLOYMENT_NAME  $AoaiDeploymentName   | Out-Null
+
+# App feature flags (Whisper transcription)
+azd env set USE_WHISPER              ($UseWhisper.ToString().ToLower())  | Out-Null
+if ($UseWhisper) {
+    azd env set WHISPER_ENDPOINT        $WhisperEndpoint       | Out-Null
+    azd env set WHISPER_DEPLOYMENT_NAME $WhisperDeploymentName | Out-Null
+    if ($WhisperApiKey) {
+        azd env set WHISPER_API_KEY     $WhisperApiKey         | Out-Null
+    }
+}
 Write-Ok "azd env variables set"
 
 # ---------- 7b. Choose build mode (local Docker vs ACR remote build) ----------

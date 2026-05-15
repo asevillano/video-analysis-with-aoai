@@ -9,9 +9,9 @@
     "aoaiAccountName":       { "value": "${AZURE_OPENAI_ACCOUNT_NAME}" },
     "aoaiDeploymentName":    { "value": "${AZURE_OPENAI_DEPLOYMENT_NAME}" },
 
-    "useWhisper":            { "value": false },
-    "whisperEndpoint":       { "value": "" },
-    "whisperDeploymentName": { "value": "" },
-    "whisperApiKey":         { "value": "" }
+    "useWhisper":            { "value": "${USE_WHISPER=false}" },
+    "whisperEndpoint":       { "value": "${WHISPER_ENDPOINT=}" },
+    "whisperDeploymentName": { "value": "${WHISPER_DEPLOYMENT_NAME=}" },
+    "whisperApiKey":         { "value": "${WHISPER_API_KEY=}" }
   }
 }

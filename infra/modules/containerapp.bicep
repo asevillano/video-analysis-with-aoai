@@ -41,7 +41,7 @@ var baseEnv = [
   }
 ]
 
-var whisperEnv = useWhisper ? [
+var whisperBaseEnv = useWhisper ? [
   {
     name: 'WHISPER_ENDPOINT'
     value: whisperEndpoint
@@ -50,11 +50,18 @@ var whisperEnv = useWhisper ? [
     name: 'WHISPER_DEPLOYMENT_NAME'
     value: whisperDeploymentName
   }
+] : []
+
+// Only inject the secret-backed env var when an API key was actually provided.
+// Otherwise the app authenticates to Whisper via Managed Identity (DefaultAzureCredential).
+var whisperKeyEnv = useWhisper && !empty(whisperApiKey) ? [
   {
     name: 'WHISPER_API_KEY'
     secretRef: 'whisper-api-key'
   }
 ] : []
+
+var whisperEnv = concat(whisperBaseEnv, whisperKeyEnv)
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: name

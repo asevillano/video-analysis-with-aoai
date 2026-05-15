@@ -25,8 +25,8 @@ param aoaiAccountName string
 param aoaiDeploymentName string
 
 // ----- Optional Whisper -----
-@description('Enable Whisper transcription path in the app.')
-param useWhisper bool = false
+@description('Enable Whisper transcription path in the app. Accepts bool or string ("true"/"false").')
+param useWhisper string = 'false'
 
 @description('Optional Whisper endpoint URL.')
 param whisperEndpoint string = ''
@@ -37,6 +37,8 @@ param whisperDeploymentName string = ''
 @description('Optional Whisper API key (stored as Container App secret).')
 @secure()
 param whisperApiKey string = ''
+
+var useWhisperBool  = toLower(useWhisper)  == 'true'
 
 // ----- Container sizing -----
 param containerCpu string = '1.0'
@@ -150,14 +152,14 @@ module app 'modules/containerapp.bicep' = {
     identityId: identity.outputs.id
     identityClientId: identity.outputs.clientId
     imageName: 'mcr.microsoft.com/k8se/quickstart:latest'
-    targetPort: 80
+    targetPort: 8501
     cpu: containerCpu
     memory: containerMemory
     minReplicas: minReplicas
     maxReplicas: maxReplicas
     aoaiEndpoint: aoai.properties.endpoint
     aoaiDeploymentName: aoaiDeploymentName
-    useWhisper: useWhisper
+    useWhisper: useWhisperBool
     whisperEndpoint: whisperEndpoint
     whisperDeploymentName: whisperDeploymentName
     whisperApiKey: whisperApiKey

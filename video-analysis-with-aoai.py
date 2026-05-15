@@ -5,6 +5,10 @@ import os
 import platform
 import time
 import json
+import atexit
+import glob
+import signal
+import sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
@@ -16,6 +20,11 @@ import yt_dlp
 from yt_dlp.utils import download_range_func
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from prompts import *
+from video_summary import (
+    _parse_analysis_json,
+    _extract_summary_items,
+    render_final_summary,
+)
 
 # Helper to locate a TrueType font on the current OS
 def _get_font_path() -> str:
@@ -65,17 +74,15 @@ REASONING_EFFORT = "medium" # "none", "low", "medium" or "high"
 load_dotenv(override=True)
 
 # System prompt for the Purpose
-SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "You are an expert on Video Analysis. You will be shown a series of images from a video. Describe what is happening in the video, including the objects, actions, and any other relevant details. Be as specific and detailed as possible. espond with a SINGLE JSON object that exactly matches this schema, and nothing else: {'description': '', 'objects': [], 'actions': []}")
-#SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
-print(f'SYSTEM PROMPT: [{SYSTEM_PROMPT}]')
-print(f'USER PROMPT:   [{USER_PROMPT}]')
+#SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
+SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
 
 # Whisper: enable/disable from .env (USE_WHISPER=true|false). Defaults to False.
 USE_WHISPER = os.environ.get("USE_WHISPER", "False").strip().lower() in ("true", "1", "yes")
 
 # Configuration of OpenAI
 aoai_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
-aoai_api_version = '2025-04-01-preview'
+aoai_api_version = os.environ.get("AZURE_OPENAI_API_VERSION", '2025-04-01-preview')
 aoai_model_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME")
 
 # Create AOAI client once per Streamlit session/process. @st.cache_resource ensures
@@ -115,17 +122,33 @@ aoai_client = _get_aoai_client()
 
 # Configuration of Whisper
 if USE_WHISPER:
-    whisper_endpoint = os.environ["WHISPER_ENDPOINT"]
-    whisper_apikey = os.environ["WHISPER_API_KEY"]
-    whisper_model_name = os.environ["WHISPER_DEPLOYMENT_NAME"]
+    whisper_endpoint = os.environ.get("WHISPER_ENDPOINT")
+    whisper_model_name = os.environ.get("WHISPER_DEPLOYMENT_NAME")
 
     @st.cache_resource(show_spinner=False)
     def _get_whisper_client():
-        return AzureOpenAI(
-            api_version='2024-02-01',
-            azure_endpoint=whisper_endpoint,
-            api_key=whisper_apikey
-        )
+        print(f'whisper_endpoint: {whisper_endpoint}, whisper_model_name: {whisper_model_name}')
+        if whisper_apikey:= os.environ.get("WHISPER_API_KEY"):
+            print("Using API key authentication for Whisper in Azure OpenAI")
+            whisper_client = AzureOpenAI(
+                azure_deployment=whisper_model_name,
+                api_version=os.environ.get("WHISPER_API_VERSION", '2024-02-01'),
+                azure_endpoint=whisper_endpoint,
+                api_key=whisper_apikey
+            )
+        else:
+            print("Using Azure AD authentication for Whisper in Azure OpenAI") 
+            credential = DefaultAzureCredential()
+            token_provider = get_bearer_token_provider(
+                credential, "https://cognitiveservices.azure.com/.default"
+            )
+            whisper_client = AzureOpenAI(
+                azure_deployment=whisper_model_name,
+                api_version=os.environ.get("WHISPER_API_VERSION", '2024-02-01'),
+                azure_endpoint=whisper_endpoint,
+                azure_ad_token_provider=token_provider
+            )
+        return whisper_client
 
     whisper_client = _get_whisper_client()
 
@@ -197,16 +220,26 @@ def process_audio(video_path):
         clip.close()
         print(f"Extracted audio to {audio_path}")
 
-        # Transcribe the audio
-        transcription = whisper_client.audio.transcriptions.create(
-            model=whisper_model_name,
-            file=open(audio_path, "rb"),
-        )
+        # Transcribe the audio. Open inside a `with` so the file handle is
+        # released as soon as the request returns (otherwise on Windows the
+        # subsequent os.remove(segment) can fail with WinError 32).
+        with open(audio_path, "rb") as audio_f:
+            transcription = whisper_client.audio.transcriptions.create(
+                model=whisper_model_name,
+                file=audio_f,
+            )
         transcription_text = transcription.text
         print("Transcript: ", transcription_text + "\n\n")
     except Exception as ex:
         print(f'ERROR: {ex}')
         transcription_text = ''
+    finally:
+        # Clean up the intermediate mp3 so it doesn't linger in temp/.
+        try:
+            if 'audio_path' in locals() and os.path.exists(audio_path):
+                os.remove(audio_path)
+        except Exception:
+            pass
 
     return transcription_text
 
@@ -221,7 +254,7 @@ def analyze_video(base64frames, system_prompt, user_prompt, transcription, tempe
                     {"role": "user", "content": user_prompt}, #"These are the frames from the video.",},
                     {"role": "user", "content": [
                         *map(lambda x: {"type": "image_url", "image_url": {"url": f'data:image/jpg;base64,{x}', "detail": "high"}}, base64frames),
-                        {"type": "text", "text": f"The audio transcription is: {transcription.text}"}
+                        {"type": "text", "text": f"The audio transcription is: {transcription}"}
                     ]}
                 ],
                 #temperature=temperature, #0.5,
@@ -258,7 +291,51 @@ def analyze_video(base64frames, system_prompt, user_prompt, transcription, tempe
     return response
 
 # Split the video in segments of N seconds (by default 3 minutes). If segment_length is 0 the full video is processed
+def _cleanup_temp_dir(temp_dir='temp'):
+    """Delete leftover files inside the temp/ folder.
+
+    Called at the start of every new analysis (to wipe segments from the
+    previous run) and registered with atexit so the folder is also emptied
+    when the app shuts down. We don't fight Streamlit's MediaFileManager on
+    Windows by deleting segments mid-run; we just clean up between runs.
+    """
+    if not os.path.isdir(temp_dir):
+        return
+    for path in glob.glob(os.path.join(temp_dir, '*')):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as ex:
+            # Silently ignore: file may still be locked by the browser; it
+            # will be cleaned up on the next run or on exit.
+            print(f'INFO: skip cleanup of {path}: {ex}')
+
+atexit.register(_cleanup_temp_dir)
+
+# On Ctrl+C / SIGTERM, Streamlit (Tornado) sometimes hangs in "Stopping..."
+# until WebSocket clients disconnect, which prevents atexit from running and
+# leaves segments in temp/. Hook the signals to force-clean and exit.
+def _handle_shutdown_signal(signum, frame):
+    print(f'\nReceived signal {signum}. Cleaning temp/ and exiting...')
+    try:
+        _cleanup_temp_dir()
+    finally:
+        os._exit(0)
+
+for _sig in (signal.SIGINT, signal.SIGTERM):
+    try:
+        signal.signal(_sig, _handle_shutdown_signal)
+    except (ValueError, OSError):
+        # signal.signal can only be called from the main thread. Streamlit
+        # reruns the script in the main thread on every interaction, so this
+        # normally succeeds; ignore otherwise.
+        pass
+
 def split_video(video_path, output_dir, segment_length=180, start_second=0):
+    # Make sure the output directory exists so moviepy doesn't fall back to writing
+    # intermediate files in the project root.
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -290,6 +367,9 @@ def split_video(video_path, output_dir, segment_length=180, start_second=0):
                 output_file,
                 codec='libx264',
                 audio_codec='aac',
+                # Keep moviepy's temp audio file (*_TEMP_MPY_wvf_snd.*) inside
+                # the same temp folder instead of polluting the project root.
+                temp_audiofile_path=output_dir or '.',
                 logger=None,
             )
         finally:
@@ -367,6 +447,9 @@ def display_analysis(st, analysis, label='Description'):
         parsed = json.loads(text)
         st.markdown(f"**{label}**")
         st.json(parsed, expanded=True)
+
+        print(f'Parsed analysis JSON for segment {segment_path}: {json.dumps(parsed, indent=2)}')
+        
     except (json.JSONDecodeError, ValueError):
         # Fallback: show as markdown so newlines/markdown formatting are respected
         st.markdown(f"**{label}**\n\n{analysis}", unsafe_allow_html=True)
@@ -398,11 +481,14 @@ with st.sidebar:
     seconds_split = int(st.number_input('Number of seconds to split the video', min_value=0, value=initial_split, step=1, help="The video will be processed in smaller segments based on the number of seconds specified in this field. (0 to not split)"))
     frames_per_second = float(st.text_input('Frames per second to extract', FRAMES_PER_SECOND, help="Number of frames to extract per second of video. It can be a decimal number, like 0.5 (one frame every 2 seconds) or 2 (two frames per second)."))
     resize = st.number_input("Frames resizing ratio", min_value=1, value=RESIZE_OF_FRAMES, step=1, help="Divider applied to width and height of each frame. 1 = original size (no resize), 2 = half size, 3 = one third, etc. Useful to reduce latency and token consumption.")
+    show_summary = st.checkbox('Show final consolidated summary', False, help="Render a final summary across all analyzed segments (extra LLM call at the end).")
     save_frames = st.checkbox('Save the frames to the folder "frames"', False)
     #temperature = float(st.number_input('Temperature for the model', DEFAULT_TEMPERATURE))
     temperature = 0.0
     system_prompt = st.text_area('System Prompt', SYSTEM_PROMPT)
     user_prompt = st.text_area('User Prompt', USER_PROMPT)
+    print(f'SYSTEM PROMPT: [{SYSTEM_PROMPT}]')
+    print(f'USER PROMPT:   [{USER_PROMPT}]')
 
     # Validate that the number of frames per segment doesn't exceed the model limit (50)
     MAX_FRAMES_PER_SEGMENT = 50
@@ -419,8 +505,8 @@ with st.sidebar:
             st.caption(f"Estimated frames per segment: {estimated_frames} / {MAX_FRAMES_PER_SEGMENT}")
         exceeds_frame_limit = False
 
-# Prepare the segment directory
-output_dir = "segments"
+# Prepare the segment directory (segments are transient: written here and deleted after processing)
+output_dir = "temp"
 os.makedirs(output_dir, exist_ok=True)
 
 # Video file or Video URL
@@ -454,7 +540,7 @@ def _request_cancel():
 
 analyze_clicked = analyze_btn_slot.button(
     "Analyze video",
-    use_container_width=True,
+    width='stretch',
     type='primary',
     disabled=exceeds_frame_limit or st.session_state.processing,
     key='analyze_btn',
@@ -463,16 +549,25 @@ analyze_clicked = analyze_btn_slot.button(
 if analyze_clicked:
     st.session_state.processing = True
     st.session_state.cancel_requested = False
+    # Wipe any leftover segments from a previous analysis. We don't try to
+    # delete them mid-run because Streamlit's MediaFileManager keeps file
+    # handles open on Windows.
+    _cleanup_temp_dir()
     # Swap the slot to a Cancel button. on_click sets the cancel flag and
     # Streamlit will trigger a rerun, which raises a RerunException at the
     # next st.* call, aborting the loop early.
     analyze_btn_slot.button(
         "Cancel Analysis",
-        use_container_width=True,
+        width='stretch',
         type='secondary',
         on_click=_request_cancel,
         key='cancel_btn_active',
     )
+
+    # Accumulator for the final summary across all segments (events / incidents / elements).
+    summary_items = []
+    # Raw per-segment analyses fed to the final consolidation LLM call.
+    segment_results = []
 
     try:
         # Placeholder shown while the first segment is being prepared (downloaded for URL,
@@ -492,7 +587,7 @@ if analyze_clicked:
             ydl_opts = {
                     #'format': 'best',
                     'format': '(bestvideo[vcodec^=av01]/bestvideo[vcodec^=vp9]/bestvideo)+bestaudio/best',
-                    'outtmpl': 'segment_%(start)s.mp4',
+                    'outtmpl': os.path.join(output_dir, 'segment_%(start)s.mp4'),
                     'force_keyframes_at_cuts': True,
             }
             ydl = yt_dlp.YoutubeDL(ydl_opts)
@@ -517,7 +612,7 @@ if analyze_clicked:
                     st.warning("Analysis cancelled by user.")
                     break
                 end = start + duracion_segmento
-                filename = f'segments/segment_{start}-{end}.mp4'
+                filename = os.path.join(output_dir, f'segment_{start}-{end}.mp4')
                 with st.spinner(f"Downloading video from second {start} to {end}..."):
                     ydl_opts['outtmpl']['default'] = filename
                     ydl_opts['download_ranges'] = download_range_func(None, [(start, end)])
@@ -544,13 +639,14 @@ if analyze_clicked:
                 analysis = execute_video_processing(st, segment_path, system_prompt, user_prompt, temperature, segment_offset=start)
                 display_analysis(st, analysis, label='Description')
 
-                # Example detecting an event
-                #event="guitarra eléctrica"
-                #if event in analysis:
-                #    st.write(f'**Detected event "{event}" in segment {segment_path}**')
-
-                # Delete the video segment
-                os.remove(segment_path)
+                # Collect items for the final summary
+                parsed_analysis = _parse_analysis_json(analysis)
+                summary_items.extend(_extract_summary_items(parsed_analysis, segment_path, start))
+                segment_results.append({
+                    'segment': os.path.basename(segment_path),
+                    'segment_start': start,
+                    'analysis_text': analysis if isinstance(analysis, str) else json.dumps(analysis),
+                })
 
         else: # Process the fideo file
             if video_file is not None:
@@ -564,10 +660,6 @@ if analyze_clicked:
                 for segment_path, segment_start in split_video(video_path, output_dir, seconds_split, start_second=starting_second):
                     if st.session_state.cancel_requested:
                         st.warning("Analysis cancelled by user.")
-                        try:
-                            os.remove(segment_path)
-                        except Exception:
-                            pass
                         break
                     # First segment ready: remove the startup placeholder before showing the video.
                     startup_status.empty()
@@ -575,19 +667,32 @@ if analyze_clicked:
                     analysis = execute_video_processing(st, segment_path, system_prompt, user_prompt, temperature, segment_offset=segment_start)
                     display_analysis(st, analysis, label='Description')
 
-                    # Delete the video segment
-                    os.remove(segment_path)
+                    # Collect items for the final summary
+                    parsed_analysis = _parse_analysis_json(analysis)
+                    summary_items.extend(_extract_summary_items(parsed_analysis, segment_path, segment_start))
+                    segment_results.append({
+                        'segment': os.path.basename(segment_path),
+                        'segment_start': segment_start,
+                        'analysis_text': analysis if isinstance(analysis, str) else json.dumps(analysis),
+                    })
 
             except Exception as ex:
                 print(f'ERROR: {ex}')
                 st.write(f'ERROR: {ex}')
+        # Render the final summary across all analyzed segments
+        if show_summary:
+            try:
+                render_final_summary(st, summary_items, segment_results, aoai_client, aoai_model_name, 'medium', segment_duration_hint=seconds_split)
+            except Exception as ex:
+                print(f'ERROR rendering summary: {ex}')
+
     finally:
         # Re-enable the button in the same slot so the user can launch a new analysis.
         st.session_state.processing = False
         st.session_state.cancel_requested = False
         analyze_btn_slot.button(
             "Analyze video",
-            use_container_width=True,
+            width='stretch',
             type='primary',
             disabled=exceeds_frame_limit,
             key='analyze_btn_done',

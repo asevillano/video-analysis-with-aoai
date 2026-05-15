@@ -8,7 +8,6 @@ __pycache__/
 .env
 .env.bak
 .azure/
-.streamlit/
 
 # Generated / runtime artifacts (large)
 frames/
