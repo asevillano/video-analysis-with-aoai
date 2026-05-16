@@ -74,8 +74,8 @@ REASONING_EFFORT = "medium" # "none", "low", "medium" or "high"
 load_dotenv(override=True)
 
 # System prompt for the Purpose
-SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
-#SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
+#SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
+SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
 
 # Whisper: enable/disable from .env (USE_WHISPER=true|false). Defaults to False.
 USE_WHISPER = os.environ.get("USE_WHISPER", "False").strip().lower() in ("true", "1", "yes")
@@ -463,30 +463,49 @@ st.set_page_config(
 st.image("microsoft.png", width=100)
 st.title(f'Video Analysis with {aoai_model_name}')
 
+# Initialise session state flags BEFORE rendering any widget so we can disable
+# the sidebar / inputs while an analysis is in progress (avoiding a rerun that
+# would abort the loop if the user touches the panel).
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
+if 'cancel_requested' not in st.session_state:
+    st.session_state.cancel_requested = False
+
+# If the previous run requested cancel, the script was rerun by the on_click callback.
+# At this point the previous in-flight loop is gone (Streamlit aborted it), so we
+# must clear both flags BEFORE rendering the sidebar — otherwise inputs_disabled
+# would still be True and the sidebar would render in disabled state.
+_cancelled_this_run = st.session_state.cancel_requested
+if _cancelled_this_run:
+    st.session_state.processing = False
+    st.session_state.cancel_requested = False
+
+inputs_disabled = st.session_state.processing
+
 with st.sidebar:
-    file_or_url = st.selectbox("Video source:", ["File", "URL"], index=0, help="Select the source, file or url")
+    file_or_url = st.selectbox("Video source:", ["File", "URL"], index=0, help="Select the source, file or url", disabled=inputs_disabled)
     initial_split = SEGMENT_DURATION
     if file_or_url == "URL":
-        continuous_transmision = st.checkbox('Continuous transmision', False, help="Video of a continuous transmision")
+        continuous_transmision = st.checkbox('Continuous transmision', False, help="Video of a continuous transmision", disabled=inputs_disabled)
 
     if USE_WHISPER:
-        audio_transcription = st.checkbox('Transcript audio', True, help="Extract the audio transcription and use in the analysis or not")
+        audio_transcription = st.checkbox('Transcript audio', True, help="Extract the audio transcription and use in the analysis or not", disabled=inputs_disabled)
         if audio_transcription:
-            show_transcription = st.checkbox('Show audio transcription', True, help="Present the audio transcription or not")
+            show_transcription = st.checkbox('Show audio transcription', True, help="Present the audio transcription or not", disabled=inputs_disabled)
     else:
         audio_transcription = False
         show_transcription = False
 
-    starting_second = int(st.number_input('Starting second', 0, help="Second of the video at which to start processing. Frames before this second will be skipped."))
-    seconds_split = int(st.number_input('Number of seconds to split the video', min_value=0, value=initial_split, step=1, help="The video will be processed in smaller segments based on the number of seconds specified in this field. (0 to not split)"))
-    frames_per_second = float(st.text_input('Frames per second to extract', FRAMES_PER_SECOND, help="Number of frames to extract per second of video. It can be a decimal number, like 0.5 (one frame every 2 seconds) or 2 (two frames per second)."))
-    resize = st.number_input("Frames resizing ratio", min_value=1, value=RESIZE_OF_FRAMES, step=1, help="Divider applied to width and height of each frame. 1 = original size (no resize), 2 = half size, 3 = one third, etc. Useful to reduce latency and token consumption.")
-    show_summary = st.checkbox('Show final consolidated summary', False, help="Render a final summary across all analyzed segments (extra LLM call at the end).")
-    save_frames = st.checkbox('Save the frames to the folder "frames"', False)
+    starting_second = int(st.number_input('Starting second', 0, help="Second of the video at which to start processing. Frames before this second will be skipped.", disabled=inputs_disabled))
+    seconds_split = int(st.number_input('Number of seconds to split the video', min_value=0, value=initial_split, step=1, help="The video will be processed in smaller segments based on the number of seconds specified in this field. (0 to not split)", disabled=inputs_disabled))
+    frames_per_second = float(st.text_input('Frames per second to extract', FRAMES_PER_SECOND, help="Number of frames to extract per second of video. It can be a decimal number, like 0.5 (one frame every 2 seconds) or 2 (two frames per second).", disabled=inputs_disabled))
+    resize = st.number_input("Frames resizing ratio", min_value=1, value=RESIZE_OF_FRAMES, step=1, help="Divider applied to width and height of each frame. 1 = original size (no resize), 2 = half size, 3 = one third, etc. Useful to reduce latency and token consumption.", disabled=inputs_disabled)
+    show_summary = st.checkbox('Show final consolidated summary', False, help="Render a final summary across all analyzed segments (extra LLM call at the end).", disabled=inputs_disabled)
+    save_frames = st.checkbox('Save the frames to the folder "frames"', False, disabled=inputs_disabled)
     #temperature = float(st.number_input('Temperature for the model', DEFAULT_TEMPERATURE))
     temperature = 0.0
-    system_prompt = st.text_area('System Prompt', SYSTEM_PROMPT)
-    user_prompt = st.text_area('User Prompt', USER_PROMPT)
+    system_prompt = st.text_area('System Prompt', SYSTEM_PROMPT, disabled=inputs_disabled)
+    user_prompt = st.text_area('User Prompt', USER_PROMPT, disabled=inputs_disabled)
     print(f'SYSTEM PROMPT: [{SYSTEM_PROMPT}]')
     print(f'USER PROMPT:   [{USER_PROMPT}]')
 
@@ -511,20 +530,15 @@ os.makedirs(output_dir, exist_ok=True)
 
 # Video file or Video URL
 if file_or_url == 'File':
-    video_file = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"])
+    video_file = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"], disabled=inputs_disabled)
 else:
-    url = st.text_area("Enter de url:", value='https://www.youtube.com/watch?v=Y6kHpAeIr4c', height=10)
+    url = st.text_area("Enter de url:", value='https://www.youtube.com/watch?v=Y6kHpAeIr4c', height=10, disabled=inputs_disabled)
 
 # Analyze the video when the button is pressed
 # The button lives inside a placeholder so we can re-render it as a 'Cancel'
 # button while the analysis is running. Cancellation is best-effort and is
 # checked between segments (not in the middle of a single AOAI call).
 analyze_btn_slot = st.empty()
-
-if 'processing' not in st.session_state:
-    st.session_state.processing = False
-if 'cancel_requested' not in st.session_state:
-    st.session_state.cancel_requested = False
 
 # If the previous run requested cancel, the script was rerun by the on_click callback.
 # At this point the previous in-flight loop is gone (Streamlit aborted it), so we
@@ -538,15 +552,32 @@ if st.session_state.cancel_requested:
 def _request_cancel():
     st.session_state.cancel_requested = True
 
+def _request_analyze():
+    # Fires BEFORE the script body re-executes on this rerun, so the sidebar
+    # below will read processing=True and render its widgets disabled.
+    st.session_state.processing = True
+    st.session_state.cancel_requested = False
+
 analyze_clicked = analyze_btn_slot.button(
     "Analyze video",
     width='stretch',
     type='primary',
     disabled=exceeds_frame_limit or st.session_state.processing,
+    on_click=_request_analyze,
     key='analyze_btn',
 )
 
 if analyze_clicked:
+    # Validate inputs before flipping into "processing" state so we don't end up
+    # with a half-initialised run (e.g. user clicks Analyze without uploading
+    # a file, which would crash later when accessing video_file.name).
+    if file_or_url == 'File' and 'video_file' in dir() and video_file is None:
+        st.error("Please upload a video file before clicking Analyze.")
+        st.stop()
+    if file_or_url == 'URL' and not (url and url.strip()):
+        st.error("Please enter a video URL before clicking Analyze.")
+        st.stop()
+
     st.session_state.processing = True
     st.session_state.cancel_requested = False
     # Wipe any leftover segments from a previous analysis. We don't try to
