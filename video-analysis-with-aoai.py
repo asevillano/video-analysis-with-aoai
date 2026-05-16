@@ -482,6 +482,13 @@ if _cancelled_this_run:
 
 inputs_disabled = st.session_state.processing
 
+# Surface a deferred validation error from the previous rerun (e.g. user clicked
+# Analyze without selecting a video). We store the message in session_state and
+# pop it here so it is shown AFTER the sidebar has been re-rendered enabled.
+_pending_err = st.session_state.pop('_pending_validation_error', None)
+if _pending_err:
+    st.error(_pending_err)
+
 with st.sidebar:
     file_or_url = st.selectbox("Video source:", ["File", "URL"], index=0, help="Select the source, file or url", disabled=inputs_disabled)
     initial_split = SEGMENT_DURATION
@@ -571,12 +578,22 @@ if analyze_clicked:
     # Validate inputs before flipping into "processing" state so we don't end up
     # with a half-initialised run (e.g. user clicks Analyze without uploading
     # a file, which would crash later when accessing video_file.name).
+    # NOTE: `_request_analyze` (the on_click callback) already set processing=True
+    # for this rerun, so the sidebar was already rendered as disabled. If validation
+    # fails we must reset the flag AND trigger a fresh rerun so the sidebar / uploader
+    # come back enabled; st.stop() alone is not enough because no widget can be
+    # interacted with to trigger the next rerun.
+    _validation_error = None
     if file_or_url == 'File' and 'video_file' in dir() and video_file is None:
-        st.error("Please upload a video file before clicking Analyze.")
-        st.stop()
-    if file_or_url == 'URL' and not (url and url.strip()):
-        st.error("Please enter a video URL before clicking Analyze.")
-        st.stop()
+        _validation_error = "Please upload a video file before clicking Analyze."
+    elif file_or_url == 'URL' and not (url and url.strip()):
+        _validation_error = "Please enter a video URL before clicking Analyze."
+
+    if _validation_error is not None:
+        st.session_state.processing = False
+        st.session_state.cancel_requested = False
+        st.session_state['_pending_validation_error'] = _validation_error
+        st.rerun()
 
     st.session_state.processing = True
     st.session_state.cancel_requested = False
