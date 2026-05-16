@@ -74,8 +74,8 @@ REASONING_EFFORT = "medium" # "none", "low", "medium" or "high"
 load_dotenv(override=True)
 
 # System prompt for the Purpose
-#SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
-SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
+SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
+#SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
 
 # Whisper: enable/disable from .env (USE_WHISPER=true|false). Defaults to False.
 USE_WHISPER = os.environ.get("USE_WHISPER", "False").strip().lower() in ("true", "1", "yes")
