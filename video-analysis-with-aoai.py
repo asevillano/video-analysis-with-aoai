@@ -77,6 +77,14 @@ load_dotenv(override=True)
 SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", GENERIC_SYSTEM_PROMPT)
 #SYSTEM_PROMPT = SYSTEM_PROMPT_COMBINED
 
+# Use cases shown in the sidebar selector. The first one is the default.
+USE_CASES = {
+    "Generic video description": GENERIC_SYSTEM_PROMPT,
+    "Riots / violent behavior detection": SYSTEM_PROMPT_RIOTS,
+    "Abandoned objects detection": SYSTEM_PROMPT_ABANDONED_OBJECTS,
+    "Combined (riots + abandoned objects)": SYSTEM_PROMPT_COMBINED,
+}
+
 # Whisper: enable/disable from .env (USE_WHISPER=true|false). Defaults to False.
 USE_WHISPER = os.environ.get("USE_WHISPER", "False").strip().lower() in ("true", "1", "yes")
 
@@ -527,7 +535,25 @@ with st.sidebar:
     save_frames = st.checkbox('Save the frames to the folder "frames"', False, disabled=inputs_disabled)
     #temperature = float(st.number_input('Temperature for the model', DEFAULT_TEMPERATURE))
     temperature = 0.0
-    system_prompt = st.text_area('System Prompt', SYSTEM_PROMPT, disabled=inputs_disabled)
+
+    # Use case selector: choosing a use case overwrites the System Prompt text area.
+    def _on_use_case_change():
+        st.session_state['system_prompt_text'] = USE_CASES[st.session_state['use_case_select']]
+
+    if 'system_prompt_text' not in st.session_state:
+        st.session_state['system_prompt_text'] = SYSTEM_PROMPT
+
+    st.selectbox(
+        'Use case',
+        list(USE_CASES.keys()),
+        index=0,
+        help="Pick a predefined use case to populate the System Prompt below.",
+        key='use_case_select',
+        on_change=_on_use_case_change,
+        disabled=inputs_disabled,
+    )
+
+    system_prompt = st.text_area('System Prompt', key='system_prompt_text', disabled=inputs_disabled)
     user_prompt = st.text_area('User Prompt', USER_PROMPT, disabled=inputs_disabled)
     print(f'SYSTEM PROMPT: [{SYSTEM_PROMPT}]')
     print(f'USER PROMPT:   [{USER_PROMPT}]')
