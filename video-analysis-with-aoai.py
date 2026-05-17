@@ -926,11 +926,15 @@ if analyze_clicked:
 
 # Re-render persisted results from previous runs (e.g. after Stop was pressed,
 # which aborts the running script via RerunException and would otherwise wipe
-# everything from the page). Only runs when there is no active analysis. The
-# list is cleared in the Analyze on_click callback, so a fresh click starts
-# from an empty list and nothing stale is shown.
+# everything from the page). Only runs when there is no active analysis AND
+# the current rerun is NOT the one that just launched a new analysis — in that
+# rerun the live loop above already rendered every segment, so this block
+# would duplicate the output. The list is cleared in the Analyze on_click
+# callback, so a fresh click starts from an empty list and nothing stale is
+# shown.
 if (
     not st.session_state.processing
+    and not analyze_clicked
     and st.session_state.completed_segments
 ):
     st.markdown('---')
