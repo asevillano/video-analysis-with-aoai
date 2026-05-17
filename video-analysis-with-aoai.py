@@ -448,7 +448,7 @@ def display_analysis(st, analysis, label='Description'):
         st.markdown(f"**{label}**")
         st.json(parsed, expanded=True)
 
-        print(f'Parsed analysis JSON for segment {segment_path}: {json.dumps(parsed, indent=2)}')
+        print(f'Parsed analysis JSON: {json.dumps(parsed, indent=2)}')
 
     except (json.JSONDecodeError, ValueError):
         # Fallback: show as markdown so newlines/markdown formatting are respected
@@ -470,6 +470,22 @@ if 'processing' not in st.session_state:
     st.session_state.processing = False
 if 'cancel_requested' not in st.session_state:
     st.session_state.cancel_requested = False
+
+# Persistent result accumulators. These survive reruns triggered by the Stop
+# button: each segment's result is appended as soon as it is produced, so even
+# if Streamlit aborts the loop mid-execution (RerunException), the data is
+# still in session_state and can be re-rendered on the next run.
+if 'completed_segments' not in st.session_state:
+    # list of {'segment_path', 'analysis', 'segment_start'}
+    st.session_state.completed_segments = []
+if 'summary_items' not in st.session_state:
+    st.session_state.summary_items = []
+if 'segment_results' not in st.session_state:
+    st.session_state.segment_results = []
+if 'last_show_summary' not in st.session_state:
+    st.session_state.last_show_summary = False
+if 'last_seconds_split' not in st.session_state:
+    st.session_state.last_seconds_split = SEGMENT_DURATION
 
 # If the previous run requested cancel, the script was rerun by the on_click callback.
 # At this point the previous in-flight loop is gone (Streamlit aborted it), so we
@@ -554,7 +570,7 @@ analyze_btn_slot = st.empty()
 if st.session_state.cancel_requested:
     st.session_state.processing = False
     st.session_state.cancel_requested = False
-    st.warning("Analysis cancelled by user.")
+    st.warning("Analysis stopped by user.")
 
 def _request_cancel():
     st.session_state.cancel_requested = True
@@ -564,6 +580,14 @@ def _request_analyze():
     # below will read processing=True and render its widgets disabled.
     st.session_state.processing = True
     st.session_state.cancel_requested = False
+    # Wipe previous analysis results immediately so the next rerun renders a
+    # clean page even before the new analysis loop has produced its first
+    # segment (otherwise the bottom re-render block would briefly show stale
+    # results from the previous run).
+    st.session_state.completed_segments = []
+    st.session_state.summary_items = []
+    st.session_state.segment_results = []
+    st.session_state.last_show_summary = False
 
 analyze_clicked = analyze_btn_slot.button(
     "Analyze video",
@@ -601,21 +625,31 @@ if analyze_clicked:
     # delete them mid-run because Streamlit's MediaFileManager keeps file
     # handles open on Windows.
     _cleanup_temp_dir()
+    # Reset persisted result accumulators for this new run (also done in the
+    # on_click callback, but repeated here in case the callback path was
+    # bypassed). Capture the per-run UI options snapshot.
+    st.session_state.completed_segments = []
+    st.session_state.summary_items = []
+    st.session_state.segment_results = []
+    st.session_state.last_show_summary = show_summary
+    st.session_state.last_seconds_split = seconds_split
     # Swap the slot to a Cancel button. on_click sets the cancel flag and
     # Streamlit will trigger a rerun, which raises a RerunException at the
     # next st.* call, aborting the loop early.
     analyze_btn_slot.button(
-        "Cancel Analysis",
+        "Stop Analysis",
         width='stretch',
         type='secondary',
         on_click=_request_cancel,
         key='cancel_btn_active',
+        help="Stop processing after the current segment. Results already obtained are preserved and (if enabled) the final summary will be generated from them.",
     )
 
     # Accumulator for the final summary across all segments (events / incidents / elements).
-    summary_items = []
+    # Aliased to session_state lists so progress survives a Stop-triggered rerun.
+    summary_items = st.session_state.summary_items
     # Raw per-segment analyses fed to the final consolidation LLM call.
-    segment_results = []
+    segment_results = st.session_state.segment_results
 
     try:
         # Placeholder shown while the first segment is being prepared (downloaded for URL,
@@ -632,6 +666,27 @@ if analyze_clicked:
         if file_or_url == 'URL': # Process Youtube video
             st.write(f'Analyzing video from url {url}...')
 
+            # Helper: count actual decodable frames in a downloaded segment.
+            # Used to auto-detect refresh-style endpoints (e.g. TfL jamcams), where
+            # download_ranges yields a 0-frame mp4 once `start` exceeds the source
+            # clip's natural duration.
+            def _segment_frame_count(path):
+                try:
+                    if not os.path.exists(path) or os.path.getsize(path) < 1024:
+                        return 0
+                    cap = cv2.VideoCapture(path)
+                    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap.release()
+                    return n
+                except Exception:
+                    return 0
+
+            # Refresh-style threshold: sources whose natural duration is smaller
+            # than this (in seconds) are treated as polling endpoints — we
+            # re-download the entire URL on each iteration instead of using
+            # download_ranges.
+            REFRESH_DURATION_THRESHOLD = 120
+
             ydl_opts = {
                     #'format': 'best',
                     'format': '(bestvideo[vcodec^=av01]/bestvideo[vcodec^=vp9]/bestvideo)+bestaudio/best',
@@ -639,48 +694,140 @@ if analyze_clicked:
                     'force_keyframes_at_cuts': True,
             }
             ydl = yt_dlp.YoutubeDL(ydl_opts)
-            if continuous_transmision == False:
-                info_dict = ydl.extract_info(url, download=False)
-                video_duration = info_dict.get('duration', 0)
 
-                if seconds_split == 0:
-                    duracion_segmento=video_duration
+            # Probe the source to decide strategy.
+            source_duration = None
+            try:
+                with st.spinner("Probing video source..."):
+                    info_dict = ydl.extract_info(url, download=False)
+                    source_duration = info_dict.get('duration', None)
+                print(f'Probed source_duration: {source_duration}')
+            except Exception as ex:
+                print(f'WARNING: could not probe source duration: {ex}')
+
+            # Decide initial mode: 'dvr' (download_ranges) or 'refresh' (full re-download per poll).
+            if continuous_transmision:
+                if source_duration is not None and source_duration < REFRESH_DURATION_THRESHOLD:
+                    stream_mode = 'refresh'
                 else:
-                    duracion_segmento=seconds_split #SEGMENT_DURATION
-            else:
+                    stream_mode = 'dvr'
                 video_duration = 48*60*60
-
+                duracion_segmento = seconds_split if seconds_split > 0 else 180
+            else:
+                stream_mode = 'dvr'
+                video_duration = source_duration if source_duration else 0
                 if seconds_split == 0:
-                    duracion_segmento=180 # 3 minutes
+                    duracion_segmento = video_duration if video_duration else 180
                 else:
-                    duracion_segmento=seconds_split #SEGMENT_DURATION
+                    duracion_segmento = seconds_split
 
-            for start in range(starting_second, video_duration, duracion_segmento):
+            print(f'Initial stream_mode: {stream_mode}, video_duration: {video_duration}, duracion_segmento: {duracion_segmento}')
+            if stream_mode == 'refresh':
+                st.info(
+                    f"🔄 Refresh-polling mode detected (source duration ≈ {source_duration:.1f}s). "
+                    f"The full clip will be re-downloaded every ~{duracion_segmento}s."
+                )
+
+            start = starting_second
+            iteration = 0
+            consecutive_empty = 0
+            last_hash = None
+            consecutive_same_hash = 0
+            MAX_CONSECUTIVE_SAME_HASH = 6  # stop if the source keeps returning the exact same bytes
+
+            while start < video_duration:
                 if st.session_state.cancel_requested:
-                    st.warning("Analysis cancelled by user.")
+                    st.warning("Analysis stopped by user. Showing results obtained so far.")
                     break
+
+                iteration += 1
                 end = start + duracion_segmento
-                filename = os.path.join(output_dir, f'segment_{start}-{end}.mp4')
-                with st.spinner(f"Downloading video from second {start} to {end}..."):
-                    ydl_opts['outtmpl']['default'] = filename
-                    ydl_opts['download_ranges'] = download_range_func(None, [(start, end)])
 
-                    print(f'start: {start}, video_duration: {video_duration}, duracion_segmento: {duracion_segmento}')
+                if stream_mode == 'refresh':
+                    # Always overwrite the same filename; the timeline is virtual.
+                    filename = os.path.join(output_dir, f'segment_{start}-{end}.mp4')
+                    poll_opts = dict(ydl_opts)
+                    poll_opts['outtmpl'] = filename
+                    poll_opts.pop('download_ranges', None)
+                    iter_start_time = time.time()
+                    with st.spinner(f"Polling source (virtual t={start}s)..."):
+                        try:
+                            with yt_dlp.YoutubeDL(poll_opts) as poll_ydl:
+                                poll_ydl.download([url])
+                        except Exception as ex:
+                            print(f'WARNING: refresh download failed: {ex}')
+                            time.sleep(min(duracion_segmento, 10))
+                            start += duracion_segmento
+                            continue
+                    segment_path = filename if os.path.exists(filename) else (
+                        filename + '.mkv' if os.path.exists(filename + '.mkv') else filename + '.webm'
+                    )
+                    # Detect a stuck/dead camera by hashing the downloaded bytes.
                     try:
-                        ydl.download([url])
-                    except:
-                        break
-
-                if os.path.exists(filename): # ext .mp4
-                    segment_path = filename
+                        import hashlib
+                        with open(segment_path, 'rb') as fh:
+                            cur_hash = hashlib.md5(fh.read()).hexdigest()
+                        if cur_hash == last_hash:
+                            consecutive_same_hash += 1
+                        else:
+                            consecutive_same_hash = 0
+                        last_hash = cur_hash
+                        if consecutive_same_hash >= MAX_CONSECUTIVE_SAME_HASH:
+                            st.warning(
+                                f"Source returned identical content {consecutive_same_hash + 1} times in a row. Stopping."
+                            )
+                            break
+                    except Exception:
+                        pass
                 else:
-                    segment_path = filename + '.mkv'
-                    if not os.path.exists(segment_path):
-                        segment_path = filename + '.webm'
+                    # DVR mode: slice the live timeline with download_ranges.
+                    filename = os.path.join(output_dir, f'segment_{start}-{end}.mp4')
+                    with st.spinner(f"Downloading video from second {start} to {end}..."):
+                        ydl_opts['outtmpl'] = {'default': filename}
+                        ydl_opts['download_ranges'] = download_range_func(None, [(start, end)])
+                        print(f'start: {start}, video_duration: {video_duration}, duracion_segmento: {duracion_segmento}')
+                        try:
+                            with yt_dlp.YoutubeDL(ydl_opts) as dvr_ydl:
+                                dvr_ydl.download([url])
+                        except Exception:
+                            break
+                    if os.path.exists(filename):
+                        segment_path = filename
+                    else:
+                        segment_path = filename + '.mkv'
+                        if not os.path.exists(segment_path):
+                            segment_path = filename + '.webm'
+                    iter_start_time = None
 
                 print(f"Segment downloaded: {segment_path}")
 
-                # First segment ready: remove the startup placeholder before showing the video.
+                # Empty-segment detection: if a DVR segment yields 0 frames after
+                # the first one succeeded, the source is actually a refresh-style
+                # endpoint — switch strategy mid-run and retry this iteration.
+                frame_count = _segment_frame_count(segment_path)
+                if frame_count == 0:
+                    consecutive_empty += 1
+                    print(f'WARNING: segment {segment_path} has 0 frames (consecutive_empty={consecutive_empty})')
+                    if stream_mode == 'dvr' and continuous_transmision and iteration > 1 and consecutive_empty >= 1:
+                        st.info("🔄 Empty segment detected — switching to refresh-polling mode.")
+                        stream_mode = 'refresh'
+                        consecutive_empty = 0
+                        # Do not advance start; retry this iteration in refresh mode.
+                        continue
+                    if consecutive_empty >= 3:
+                        st.warning("Too many empty segments. Stopping.")
+                        break
+                    # Advance and try again.
+                    start += duracion_segmento
+                    if stream_mode == 'refresh':
+                        # Pace polling.
+                        elapsed = time.time() - iter_start_time if iter_start_time else 0
+                        time.sleep(max(0, duracion_segmento - elapsed))
+                    continue
+                else:
+                    consecutive_empty = 0
+
+                # First successful segment: remove the startup placeholder.
                 startup_status.empty()
 
                 # Process the video segment (start = absolute offset from the beginning of the original video)
@@ -695,6 +842,21 @@ if analyze_clicked:
                     'segment_start': start,
                     'analysis_text': analysis if isinstance(analysis, str) else json.dumps(analysis),
                 })
+                st.session_state.completed_segments.append({
+                    'segment_path': segment_path,
+                    'analysis': analysis,
+                    'segment_start': start,
+                })
+
+                # Pace polling so we don't hammer refresh endpoints faster than they update.
+                if stream_mode == 'refresh' and iter_start_time is not None:
+                    elapsed = time.time() - iter_start_time
+                    remaining = duracion_segmento - elapsed
+                    if remaining > 0:
+                        with st.spinner(f"Waiting {remaining:.1f}s before next poll..."):
+                            time.sleep(remaining)
+
+                start += duracion_segmento
 
         else: # Process the fideo file
             if video_file is not None:
@@ -718,7 +880,7 @@ if analyze_clicked:
                         except StopIteration:
                             break
                     if st.session_state.cancel_requested:
-                        st.warning("Analysis cancelled by user.")
+                        st.warning("Analysis stopped by user. Showing results obtained so far.")
                         break
                     # First segment ready: remove the startup placeholder before showing the video.
                     startup_status.empty()
@@ -733,6 +895,11 @@ if analyze_clicked:
                         'segment': os.path.basename(segment_path),
                         'segment_start': segment_start,
                         'analysis_text': analysis if isinstance(analysis, str) else json.dumps(analysis),
+                    })
+                    st.session_state.completed_segments.append({
+                        'segment_path': segment_path,
+                        'analysis': analysis,
+                        'segment_start': segment_start,
                     })
 
             except Exception as ex:
@@ -756,3 +923,36 @@ if analyze_clicked:
             disabled=exceeds_frame_limit,
             key='analyze_btn_done',
         )
+
+# Re-render persisted results from previous runs (e.g. after Stop was pressed,
+# which aborts the running script via RerunException and would otherwise wipe
+# everything from the page). Only runs when there is no active analysis. The
+# list is cleared in the Analyze on_click callback, so a fresh click starts
+# from an empty list and nothing stale is shown.
+if (
+    not st.session_state.processing
+    and st.session_state.completed_segments
+):
+    st.markdown('---')
+    st.subheader('Previous analysis results')
+    for seg in st.session_state.completed_segments:
+        seg_path = seg['segment_path']
+        st.write(f"Video: {seg_path}:")
+        if os.path.exists(seg_path):
+            st.video(seg_path)
+        else:
+            st.caption('_(segment file no longer available)_')
+        display_analysis(st, seg['analysis'], label='Description')
+    if st.session_state.last_show_summary:
+        try:
+            render_final_summary(
+                st,
+                st.session_state.summary_items,
+                st.session_state.segment_results,
+                aoai_client,
+                aoai_model_name,
+                'medium',
+                segment_duration_hint=st.session_state.last_seconds_split,
+            )
+        except Exception as ex:
+            print(f'ERROR rendering persisted summary: {ex}')
