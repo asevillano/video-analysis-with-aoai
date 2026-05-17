@@ -83,6 +83,7 @@ USE_CASES = {
     "Riots / violent behavior detection": SYSTEM_PROMPT_RIOTS,
     "Abandoned objects detection": SYSTEM_PROMPT_ABANDONED_OBJECTS,
     "Combined (riots + abandoned objects)": SYSTEM_PROMPT_COMBINED,
+    "Shoplifting detection": SYSTEM_PROMPT_SHOPLIFTING,
 }
 
 # Whisper: enable/disable from .env (USE_WHISPER=true|false). Defaults to False.
@@ -949,6 +950,14 @@ if analyze_clicked:
             disabled=exceeds_frame_limit,
             key='analyze_btn_done',
         )
+        # The sidebar was rendered earlier in this run with inputs_disabled=True
+        # (because processing was True at that point). Flipping the flag now is
+        # not enough — the widgets above us in the script have already been
+        # drawn for this run and will stay disabled until the next rerun.
+        # Force a fresh rerun so the sidebar re-renders with widgets enabled.
+        # Results are preserved in session_state and re-rendered by the
+        # "Previous analysis results" block below.
+        st.rerun()
 
 # Re-render persisted results from previous runs (e.g. after Stop was pressed,
 # which aborts the running script via RerunException and would otherwise wipe
