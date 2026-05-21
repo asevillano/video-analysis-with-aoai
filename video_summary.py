@@ -135,10 +135,11 @@ def _format_segment_range(segment_start, segment_duration):
 
 
 # Call the model once with all per-segment analyses to produce ONE consolidated summary
-# of the WHOLE video. Returns a dict with: overall_summary, events[], incidents[], elements[].
+# of the WHOLE video. Returns a tuple (result_dict, usage_dict) where usage has
+# prompt_tokens / completion_tokens / total_tokens (zeros on error).
 def consolidate_video_summary(segment_results, aoai_client, aoai_model_name, reasoning_effort='medium'):
     if not segment_results:
-        return None
+        return None, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     # Build a compact textual payload with one block per segment
     blocks = []
@@ -170,22 +171,60 @@ def consolidate_video_summary(segment_results, aoai_client, aoai_model_name, rea
         "Keep lists deduplicated."
     )
 
-    try:
-        response = aoai_client.chat.completions.create(
-            model=aoai_model_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Per-segment analyses to consolidate:\n\n{joined}"},
-            ],
-            max_completion_tokens=4096,
-            reasoning_effort=reasoning_effort,
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content
-        return json.loads(content)
-    except Exception as ex:
-        print(f'ERROR consolidating summary: {ex}')
-        return {'_error': str(ex)}
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Per-segment analyses to consolidate:\n\n{joined}"},
+    ]
+
+    # Retry with progressively larger budgets: reasoning models can consume the entire
+    # max_completion_tokens on internal reasoning and return an empty message content,
+    # which makes json.loads fail with "Expecting value: line 1 column 1 (char 0)".
+    budgets = [8192, 16384, 32768]
+    last_error = None
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for budget in budgets:
+        try:
+            response = aoai_client.chat.completions.create(
+                model=aoai_model_name,
+                messages=messages,
+                max_completion_tokens=budget,
+                reasoning_effort=reasoning_effort,
+                response_format={"type": "json_object"},
+            )
+            choice = response.choices[0] if response.choices else None
+            content = (getattr(choice.message, 'content', None) if choice else None) or ''
+            finish_reason = getattr(choice, 'finish_reason', '') if choice else ''
+            usage_obj = getattr(response, 'usage', None)
+            usage = {
+                "prompt_tokens": int(getattr(usage_obj, 'prompt_tokens', 0) or 0),
+                "completion_tokens": int(getattr(usage_obj, 'completion_tokens', 0) or 0),
+                "total_tokens": int(getattr(usage_obj, 'total_tokens', 0) or 0),
+            }
+            text = content.strip()
+            if not text:
+                last_error = f"empty response from model (finish_reason={finish_reason}, budget={budget})"
+                print(f'WARN consolidating summary: {last_error}; retrying with larger budget...')
+                continue
+            # Strip ```json fences if present
+            if text.startswith('```'):
+                lines = text.splitlines()
+                if lines[0].startswith('```'):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith('```'):
+                    lines = lines[:-1]
+                text = '\n'.join(lines).strip()
+            try:
+                return json.loads(text), usage
+            except (json.JSONDecodeError, ValueError) as je:
+                last_error = f"invalid JSON (finish_reason={finish_reason}, budget={budget}): {je}"
+                print(f'WARN consolidating summary: {last_error}; retrying with larger budget...')
+                continue
+        except Exception as ex:
+            last_error = str(ex)
+            print(f'ERROR consolidating summary (budget={budget}): {ex}')
+            continue
+
+    return {'_error': last_error or 'unknown error'}, usage
 
 
 # Render a final summary of the WHOLE video at the end of the analysis.
@@ -232,16 +271,16 @@ def render_final_summary(st, collected_items, segment_results, aoai_client, aoai
     if not segment_results:
         if not incidents:
             st.info("No events, incidents or elements were reported by the model.")
-        return
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     with st.spinner("Generating consolidated video summary..."):
-        consolidated = consolidate_video_summary(
+        consolidated, summary_usage = consolidate_video_summary(
             segment_results, aoai_client, aoai_model_name, reasoning_effort=reasoning_effort
         )
 
     if not consolidated or consolidated.get('_error'):
         st.warning(f"Could not generate consolidated summary: {consolidated.get('_error','unknown error') if consolidated else 'no output'}")
-        return
+        return summary_usage
 
     if consolidated.get('overall_summary'):
         st.subheader("🎬 Overall summary")
@@ -282,3 +321,5 @@ def render_final_summary(st, collected_items, segment_results, aoai_client, aoai
             st.markdown("- **Actions:** " + ", ".join(str(x) for x in elements['actions']))
         if elements.get('people'):
             st.markdown("- **People:** " + ", ".join(str(x) for x in elements['people']))
+
+    return summary_usage

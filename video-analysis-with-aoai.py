@@ -26,6 +26,20 @@ from video_summary import (
     render_final_summary,
 )
 
+# Silence harmless ConnectionResetError cleanup noise from the Windows ProactorEventLoop
+# (sockets closed by the remote server after async HTTPS requests complete).
+import asyncio
+if sys.platform == 'win32':
+    def _silence_proactor_reset(loop, context):
+        exc = context.get('exception')
+        if isinstance(exc, ConnectionResetError):
+            return
+        loop.default_exception_handler(context)
+    try:
+        asyncio.get_event_loop().set_exception_handler(_silence_proactor_reset)
+    except RuntimeError:
+        pass
+
 # Helper to locate a TrueType font on the current OS
 def _get_font_path() -> str:
     if platform.system() == "Windows":
@@ -69,6 +83,52 @@ DEFAULT_TEMPERATURE = 0.5
 RESIZE_OF_FRAMES = 1
 FRAMES_PER_SECOND = 3
 REASONING_EFFORT = "medium" # "none", "low", "medium" or "high"
+
+# Pricing for the Azure OpenAI model (USD per 1M tokens). Override in .env to match your
+# deployment's pricing. Defaults reflect GPT-5.2 Global list prices (Azure OpenAI).
+AOAI_PRICE_INPUT_PER_1M = float(os.environ.get("AOAI_PRICE_INPUT_PER_1M", "1.75"))
+AOAI_PRICE_OUTPUT_PER_1M = float(os.environ.get("AOAI_PRICE_OUTPUT_PER_1M", "14.00"))
+# Whisper pricing (USD per minute of audio). Default: Azure OpenAI Whisper list price.
+WHISPER_PRICE_PER_MIN = float(os.environ.get("WHISPER_PRICE_PER_MIN", "0.006"))
+
+def _compute_cost(prompt_tokens: int, completion_tokens: int) -> float:
+    return (prompt_tokens / 1_000_000.0) * AOAI_PRICE_INPUT_PER_1M + \
+           (completion_tokens / 1_000_000.0) * AOAI_PRICE_OUTPUT_PER_1M
+
+def _compute_whisper_cost(duration_sec: float) -> float:
+    return (duration_sec / 60.0) * WHISPER_PRICE_PER_MIN
+
+# Tiktoken-based token counter for prompt text. Falls back to a coarse char/4
+# estimate if tiktoken is not installed or fails to load an encoder.
+try:
+    import tiktoken
+    try:
+        _TIKTOKEN_ENC = tiktoken.get_encoding("o200k_base")
+    except Exception:
+        _TIKTOKEN_ENC = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _TIKTOKEN_ENC = None
+
+def _count_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    if _TIKTOKEN_ENC is not None:
+        try:
+            return len(_TIKTOKEN_ENC.encode(text))
+        except Exception:
+            pass
+    # Fallback: rough estimate (~4 chars per token).
+    return max(1, len(text) // 4)
+
+def _get_video_duration_sec(path: str) -> float:
+    try:
+        cap = cv2.VideoCapture(path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return (n / fps) if fps > 0 else 0.0
+    except Exception:
+        return 0.0
 
 # Load configuration
 load_dotenv(override=True)
@@ -254,6 +314,16 @@ def process_audio(video_path):
 
 # Function to analyze the video with AOAI
 def analyze_video(base64frames, system_prompt, user_prompt, transcription, temperature):
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    # Pre-compute text-token breakdown so we can attribute prompt tokens to
+    # system / user-text / images (the API only returns the aggregate).
+    system_tokens = _count_text_tokens(system_prompt)
+    user_text_tokens = _count_text_tokens(user_prompt)
+    transcription_tokens = _count_text_tokens(transcription) if transcription else 0
+    usage["system_tokens"] = system_tokens
+    usage["user_text_tokens"] = user_text_tokens
+    usage["transcription_tokens"] = transcription_tokens
+    usage["image_tokens"] = 0
     try:
         if transcription != '': # Include the audio transcription
             response = aoai_client.chat.completions.create(
@@ -291,13 +361,22 @@ def analyze_video(base64frames, system_prompt, user_prompt, transcription, tempe
 
         json_response = json.loads(response.model_dump_json())
         #print(f'RESPONSE: [{response.model_dump_json(indent=2)}]')
+        usage_raw = json_response.get('usage') or {}
+        usage["prompt_tokens"] = int(usage_raw.get('prompt_tokens', 0) or 0)
+        usage["completion_tokens"] = int(usage_raw.get('completion_tokens', 0) or 0)
+        usage["total_tokens"] = int(usage_raw.get('total_tokens', 0) or 0)
+        # Image tokens = prompt_tokens - (text tokens + small chat-format overhead).
+        # We don't know the exact overhead, so we attribute the remainder to images
+        # and floor at 0.
+        text_total = system_tokens + user_text_tokens + transcription_tokens
+        usage["image_tokens"] = max(0, usage["prompt_tokens"] - text_total)
         response = json_response['choices'][0]['message']['content']
 
     except Exception as ex:
         print(f'ERROR: {ex}')
         response = f'ERROR: {ex}'
 
-    return response
+    return response, usage
 
 # Split the video in segments of N seconds (by default 3 minutes). If segment_length is 0 the full video is processed
 def _cleanup_temp_dir(temp_dir='temp'):
@@ -425,16 +504,38 @@ def execute_video_processing(st, segment_path, system_prompt, user_prompt, tempe
         # Analyze the video frames and the audio transcription with AOAI
         with st.spinner(msg):
             inicio = time.time()
-            analysis = analyze_video(base64frames, system_prompt, user_prompt, transcription, temperature)
+            analysis, usage = analyze_video(base64frames, system_prompt, user_prompt, transcription, temperature)
             fin = time.time()
         print(f'\t>>>> Analysys with {aoai_model_name} took {(fin - inicio):.3f} seconds <<<<')
 
     ### st.write(f"**Analysis of segment {segment_path}** ({(fin - inicio):.3f} seconds)")
     fin = time.time()
     print(f'\t>>>> {(fin - inicio):.6f} segundos <<<<')
-    st.success("Analysis completed.")
+    st.success("Segment analysys completed.")
 
-    return analysis
+    # ---- Cost per minute reporting (console only) ----
+    segment_duration_sec = _get_video_duration_sec(segment_path)
+    aoai_cost = _compute_cost(usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
+    # Only charge Whisper if transcription actually produced text. If the video has no
+    # audio track, process_audio() returns '' and no request was billable.
+    whisper_used = bool(audio_transcription and transcription)
+    whisper_cost = _compute_whisper_cost(segment_duration_sec) if whisper_used else 0.0
+    if audio_transcription and not transcription:
+        print('\t>>>> Note: audio transcription requested but no audio was transcribed — Whisper cost not charged for this segment <<<<')
+    segment_cost = aoai_cost + whisper_cost
+    minutes = segment_duration_sec / 60.0 if segment_duration_sec > 0 else 0.0
+    cost_per_minute = (segment_cost / minutes) if minutes > 0 else 0.0
+    print(
+        f'\t>>>> COST [segment] tokens(in/out/total)={usage.get("prompt_tokens", 0)}/'
+        f'{usage.get("completion_tokens", 0)}/{usage.get("total_tokens", 0)} '
+        f'[sys={usage.get("system_tokens", 0)} user={usage.get("user_text_tokens", 0)} '
+        f'transcript={usage.get("transcription_tokens", 0)} images={usage.get("image_tokens", 0)}] '
+        f'duration={segment_duration_sec:.2f}s ({minutes:.3f} min) '
+        f'aoai=${aoai_cost:.6f} whisper=${whisper_cost:.6f} '
+        f'cost=${segment_cost:.6f} cost/min=${cost_per_minute:.6f} <<<<'
+    )
+
+    return analysis, usage, segment_duration_sec, whisper_cost
 
 # Helper to display the model response: pretty-print JSON when possible, otherwise markdown
 def display_analysis(st, analysis, label='Description'):
@@ -457,7 +558,7 @@ def display_analysis(st, analysis, label='Description'):
         st.markdown(f"**{label}**")
         st.json(parsed, expanded=True)
 
-        print(f'Parsed analysis JSON: {json.dumps(parsed, indent=2)}')
+        #print(f'Parsed analysis JSON: {json.dumps(parsed, indent=2)}')
 
     except (json.JSONDecodeError, ValueError):
         # Fallback: show as markdown so newlines/markdown formatting are respected
@@ -678,6 +779,22 @@ if analyze_clicked:
     # Raw per-segment analyses fed to the final consolidation LLM call.
     segment_results = st.session_state.segment_results
 
+    # Cost / usage totals across all segments (console-only reporting).
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_system_tokens = 0
+    total_user_text_tokens = 0
+    total_transcription_tokens = 0
+    total_image_tokens = 0
+    total_aoai_cost_usd = 0.0
+    total_whisper_cost_usd = 0.0
+    total_video_seconds = 0.0
+    print(
+        f'>>>> PRICING: input=${AOAI_PRICE_INPUT_PER_1M}/1M tokens, '
+        f'output=${AOAI_PRICE_OUTPUT_PER_1M}/1M tokens (model={aoai_model_name}), '
+        f'whisper=${WHISPER_PRICE_PER_MIN}/min <<<<'
+    )
+
     try:
         # Placeholder shown while the first segment is being prepared (downloaded for URL,
         # written + split for File). It is cleared right before the first segment is
@@ -858,8 +975,17 @@ if analyze_clicked:
                 startup_status.empty()
 
                 # Process the video segment (start = absolute offset from the beginning of the original video)
-                analysis = execute_video_processing(st, segment_path, system_prompt, user_prompt, temperature, segment_offset=start)
+                analysis, usage, segment_duration_sec, whisper_cost = execute_video_processing(st, segment_path, system_prompt, user_prompt, temperature, segment_offset=start)
                 display_analysis(st, analysis, label='Description')
+                total_prompt_tokens += usage.get('prompt_tokens', 0)
+                total_completion_tokens += usage.get('completion_tokens', 0)
+                total_system_tokens += usage.get('system_tokens', 0)
+                total_user_text_tokens += usage.get('user_text_tokens', 0)
+                total_transcription_tokens += usage.get('transcription_tokens', 0)
+                total_image_tokens += usage.get('image_tokens', 0)
+                total_aoai_cost_usd += _compute_cost(usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
+                total_whisper_cost_usd += whisper_cost
+                total_video_seconds += segment_duration_sec
 
                 # Collect items for the final summary
                 parsed_analysis = _parse_analysis_json(analysis)
@@ -912,8 +1038,17 @@ if analyze_clicked:
                     # First segment ready: remove the startup placeholder before showing the video.
                     startup_status.empty()
                     # Process the video segment passing the absolute offset from the beginning of the original video
-                    analysis = execute_video_processing(st, segment_path, system_prompt, user_prompt, temperature, segment_offset=segment_start)
+                    analysis, usage, segment_duration_sec, whisper_cost = execute_video_processing(st, segment_path, system_prompt, user_prompt, temperature, segment_offset=segment_start)
                     display_analysis(st, analysis, label='Description')
+                    total_prompt_tokens += usage.get('prompt_tokens', 0)
+                    total_completion_tokens += usage.get('completion_tokens', 0)
+                    total_system_tokens += usage.get('system_tokens', 0)
+                    total_user_text_tokens += usage.get('user_text_tokens', 0)
+                    total_transcription_tokens += usage.get('transcription_tokens', 0)
+                    total_image_tokens += usage.get('image_tokens', 0)
+                    total_aoai_cost_usd += _compute_cost(usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
+                    total_whisper_cost_usd += whisper_cost
+                    total_video_seconds += segment_duration_sec
 
                     # Collect items for the final summary
                     parsed_analysis = _parse_analysis_json(analysis)
@@ -933,11 +1068,84 @@ if analyze_clicked:
                 print(f'ERROR: {ex}')
                 st.write(f'ERROR: {ex}')
         # Render the final summary across all analyzed segments
+        video_source_label = url if file_or_url == 'URL' else (video_file.name if 'video_file' in dir() and video_file is not None else '')
+        st.success(f"Video Analysys completed: {video_source_label}")
+        summary_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if show_summary:
             try:
-                render_final_summary(st, summary_items, segment_results, aoai_client, aoai_model_name, 'medium', segment_duration_hint=seconds_split)
+                summary_usage = render_final_summary(st, summary_items, segment_results, aoai_client, aoai_model_name, 'medium', segment_duration_hint=seconds_split) or summary_usage
             except Exception as ex:
                 print(f'ERROR rendering summary: {ex}')
+        summary_cost_usd = _compute_cost(summary_usage.get('prompt_tokens', 0), summary_usage.get('completion_tokens', 0))
+
+        # ---- Final cost-per-minute report (console only) ----
+        total_minutes = total_video_seconds / 60.0 if total_video_seconds > 0 else 0.0
+        per_segment_cost_usd = total_aoai_cost_usd + total_whisper_cost_usd
+        total_cost_usd = per_segment_cost_usd + summary_cost_usd
+        # Cost per minute reflects only per-segment processing (AOAI + Whisper).
+        # The final consolidated summary is a one-off call independent of video length,
+        # so it is excluded from the per-minute rate but added to TOTAL VIDEO COST.
+        avg_cost_per_minute = (per_segment_cost_usd / total_minutes) if total_minutes > 0 else 0.0
+
+        # Probe the first completed segment to report original / resized frame dimensions.
+        original_w, original_h = 0, 0
+        try:
+            first_seg = next(
+                (s['segment_path'] for s in st.session_state.completed_segments if os.path.exists(s['segment_path'])),
+                None,
+            )
+            if first_seg:
+                cap = cv2.VideoCapture(first_seg)
+                original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+        except Exception:
+            pass
+        resized_w = original_w // resize if resize > 1 and original_w else original_w
+        resized_h = original_h // resize if resize > 1 and original_h else original_h
+        estimated_frames_per_seg = int(seconds_split * frames_per_second) if seconds_split > 0 else 0
+        total_frames_sent = int(round(total_video_seconds * frames_per_second)) if frames_per_second > 0 else 0
+
+        print('')
+        print('================ COST SUMMARY ================')
+        print(f'Model:                 {aoai_model_name}')
+        print(f'Reasoning effort:      {REASONING_EFFORT}')
+        print(f'Image detail mode:     high')
+        print(f'Frames per second:     {frames_per_second}')
+        print(f'Resize ratio:          {resize}x  (1 = no resize)')
+        if original_w and original_h:
+            print(f'Frame size original:   {original_w}x{original_h} px')
+            print(f'Frame size sent:       {resized_w}x{resized_h} px')
+        print(f'Segment duration:      {seconds_split} s  (0 = no split)')
+        print(f'Frames per segment:    ~{estimated_frames_per_seg}')
+        print(f'Frames sent (total):   ~{total_frames_sent}')
+        print(f'Audio transcription:   {"enabled (Whisper)" if audio_transcription else "disabled"}')
+        print('----------------------------------------------')
+        print(f'Pricing: AOAI input=${AOAI_PRICE_INPUT_PER_1M}/1M, output=${AOAI_PRICE_OUTPUT_PER_1M}/1M, whisper=${WHISPER_PRICE_PER_MIN}/min')
+        print(f'Segments processed:    {len(segment_results)}')
+        print(f'Video duration:        {total_video_seconds:.2f} s ({total_minutes:.3f} min)')
+        print(f'Prompt tokens:         {total_prompt_tokens}')
+        print(f'  ├─ system prompt:    {total_system_tokens}')
+        print(f'  ├─ user prompt:      {total_user_text_tokens}')
+        if total_transcription_tokens:
+            print(f'  ├─ transcription:    {total_transcription_tokens}')
+        print(f'  └─ frames (images):  {total_image_tokens}')
+        print(f'Completion tokens:     {total_completion_tokens}')
+        print(f'Total tokens:          {total_prompt_tokens + total_completion_tokens}')
+        print(f'AOAI cost:             ${total_aoai_cost_usd:.6f} USD')
+        print(f'Whisper cost:          ${total_whisper_cost_usd:.6f} USD')
+        if show_summary:
+            print('---- Final consolidated summary (extra LLM call) ----')
+            print(f'Summary prompt tokens:     {summary_usage.get("prompt_tokens", 0)}')
+            print(f'Summary completion tokens: {summary_usage.get("completion_tokens", 0)}')
+            print(f'Summary total tokens:      {summary_usage.get("prompt_tokens", 0) + summary_usage.get("completion_tokens", 0)}')
+            print(f'Final summary cost:        ${summary_cost_usd:.6f} USD')
+            print('-----------------------------------------------------')
+        print(f'TOTAL VIDEO COST:      ${total_cost_usd:.6f} USD  (full video, all segments'
+              + (' + final summary)' if show_summary else ')'))
+        print(f'Cost per minute video: ${avg_cost_per_minute:.6f} USD/min'
+              + ('  (excludes final summary)' if show_summary else ''))
+        print('==============================================')
 
     finally:
         # Re-enable the button in the same slot so the user can launch a new analysis.
